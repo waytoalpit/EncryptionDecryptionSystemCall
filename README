@@ -1,0 +1,221 @@
+#################################################################READ ME##################################################################
+								############
+								#Homework 1#
+								############
+						#Subject: CSE-506 (Fall 2015) Homework Assignment #1
+
+						#topic: Encryption-Decryption System Call Implementaion
+
+
+######################
+#GOAL OF THE PROJECT:#
+###################### 
+This project is developed to enable a Kernel System call which provides File Encryption/Decryption using COUNTER(CTR) Block Cipher Technique.
+Basics of Block Cipher Mode Operations has been refernced from #https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#
+This project covers almost every aspects starting with the user/kernel level input validation, making system call, perform Encryption/Decryption based
+on operating system's "PAGE_SIZE" and proper termination of the process. 
+
+#########################
+#List of files involved:#
+#########################
+
+1. Makefile:
+    Clean:   To remove all the previously generated complied files.
+    xcipher: Using GCC Compiler system to build xcipher.c without any error or warnings, performs user level argument validation and 
+	     making System Call. It generates executable by the name "xcipher" which is used to make system call.
+    xcrypt:  Using GCC Compiler system to build xcrypt module without any error or warnings, includes sys_xcrypt.c for actual system call
+             implementation. It generates sys_xcrypt.ko file which gets inserted to the kernel.
+   
+2. install_module.sh:
+    Includes lsmod: shows information about all loaded modules
+	     rmmod: unloads loadable(sys_xcrypt) modules from the running kernel
+	     insmod: installs a loadable module(sys_xcrypt.ko) in the running kernel
+
+3. kernel.config:
+	Includes minimum configurations to load kernel to the system.
+	Used make menuconfig to design minimum required configuration to bring up the kernel and use for this system call.
+	Below guidlines provide by Prof Eriz Zadok has been used to prepare the config file.
+	#http://www3.cs.stonybrook.edu/~ezk/cse506-f15/lab.html#
+	Working version: 
+		bash-3.2# uname -r
+		4.0.9+
+	
+	Compilation procedure:
+	cd /usr/src/hw1-algupta/
+	a. make clean
+	b. make
+	c. make modules
+	d. make modules_install
+	e. make install
+
+4. xcipher.c:
+	User space program to handle user inputs, validating it for the expected values, returning/prompting user in case of error.
+	a. Includes main method as starting point of this homework.
+	b. Parsing command line arguments to the user level varaibles.
+	c. Set of validation for wrong inputs like mandatory parameters not entered, password to encrypt/decrypt has not been provided,
+	   input/output file has not been specified etc.
+	d. Used openssl MD5 library to convert user level passowrd to MD5 hash value.
+	   MD5((const unsigned char*)pwd, strlen(pwd), md);
+	   
+	e. Copying all user parameters to the structure attributes and finally making system call from here.
+	   syscall(__NR_xcrypt,&arg);	
+	   
+	f. Depending upon the system call return, error message will be notified to the user.
+	   There would be no message on successful return.
+
+5. sys_xcrypt.h
+	a. Created a customized structure to hold all the parameters in a single bucket
+	    typedef struct syscallargs 
+		 {
+			char *infile;		// Input file provided for encryption/decryption 		
+			char *outfile;		// Output file provided for decryption/encryption
+			char *keybuf;		// keybuffer to hold password provide by user
+			int keylen;         // password or keybuffer length    
+			int flags;			// flag to indicate whether to perform encryption or decryption.
+		 } sysargs;
+
+	b. This header file is used in both user level(xcipher.c) and kernel level(sys_xcrypt.c) files to support structure access.
+	
+6. sys_xcrypt.c:
+	Most important file which gets called on loading/unloading of the module and also keeps actual system call implementation.
+	a. asmlinkage long xcrypt(void *arg)
+		program starts with above system call:
+	   
+	b. long isValidInput(void *arg)
+		It receives user struct argument in void * and checks for the validity of input. This step is very important from kernel perspective
+		as kernel can not trust user for the given arguments, it may crash the system. So detailed validation is required to protect
+		the kernel and memory for any kind of destruction. It specifically check that whether kernel has read access to user space so that
+		he is able to read the given arguments, it also checks for the input/output file size, key buffer length etc. In case of any unexpected
+		behavior, proper error code will be returned to the user and program will terminate. goto keyword has been used extensively to smoothly
+		jump to the required check points.
+
+	c. long copyData(sysargs *arg, sysargs *k_arg)
+		In case of successful validation, parameters will be copied to from user to kernel space using kmalloc.
+		Sufficient memory blocks will be created for input/output files, keybuffer etc and data will be copied from user to kernel space.
+		copy_from_user function has been used to perform the copy process. After copying of all the string values, it is our responsibility
+		to terminate them with null characters.
+		In case of any failure like insufficient memory, proper error messages will be returned to the user.
+		
+	d. File structure is created to handle input file. In case of any error while accessing it, error value will be returned and program
+		will be terminated. There is a successive check to verify whether given inout file is regular or not? In case of any directory
+		including root(/) directory, error will be returned("Bad file descriptor")
+		
+	e. Another file structure would be created check if the output file already exists? In absence of it, new output file would be created.
+		If file is already present, it will not create a new file. Instead later it will rename the tmp file to the output filein case of 
+		successful encryption/decryption. In any case a write mode enabled tmp file would be generated to perform the intermediate operations.
+		Same file permission is added to the output file as compared with the inout file. If the input and output file is same, it would 
+		give invalid arguments as error. Error scnario is also handled for symlinks and hardlinks.
+		
+	f. numberOfPageSize=fileSize/PAGE_SIZE;
+		Input file size is calculated and divided into integral multiple of PAGE_SIZE and rest of the remaining chunks for the last operation.
+	
+	g. Again MD5 has been calulated for the MD5 hash keybuffer passed from the user side not to expose it to the intruders.
+		Code has been refernced from http://lxr.fsl.cs.sunysb.edu/linux/source/include/crypto/hash.h#L753
+		Method crypto_shash_digest impl has been referenced.
+		
+	h. Double hashed key would be written to the output file as part of encryption and where as same will be read from the output file while
+		decryption and verified against the newly generated double hashed MD5 value. In case of key mismatch, proper error will be returned
+		to the user.
+		
+	i. Encryption: 
+		Data would be read from input file in the chunk of PAGE_SIZE(here, 4KB) and would be sent for encryption.
+			doEncryption(k_arg->keybuf, AES_BLOCK_SIZE, bufTemp, &bytesRead, buf, PAGE_SIZE);
+		Where as in case of last chunk not equal to PAGE_SIZE, remaining bytes will be sent to the AES encryption function.
+			doEncryption(k_arg->keybuf, AES_BLOCK_SIZE, bufTemp, &bytesRead, buf, bytesRead);
+		
+		I have implemented CTR mode AES cipher to perform encryption which does not require explicit padding, instead it takes care of it.
+		Code has been refernced from 
+		#####http://lxr.free-electrons.com/source/net/ceph/crypto.c#####
+		#ceph_aes_encrypt# function which eventually call #crypto_blkcipher_encrypt# api
+		
+		static int doEncryption(const void *key, int key_len, void *dst, size_t *dst_len, const void *src, size_t src_len)
+			. Scatterlist structure is created to hold src and dest buffers
+				struct scatterlist sg_in[1], sg_out[1];
+			. Block cipher descriptor is created to hold tfm and flag values(includes CTR mode)
+				struct crypto_blkcipher *tfm = crypto_alloc_blkcipher("ctr(aes)", 0, CRYPTO_ALG_ASYNC);
+				struct blkcipher_desc desc = {.tfm = tfm, .flags = 0};
+			. Initialization vector is used along with key to do encryption.
+				iv = crypto_blkcipher_crt(tfm)->iv;
+			. Set the key value
+				ret = crypto_blkcipher_setkey(tfm, key, key_len);
+			. Initilaize SG table and set with src and dest buffers to it
+			. Function has been refernced from 
+				####http://lxr.free-electrons.com/source/include/linux/crypto.h#L1333####                                                                 
+				#crypto_blkcipher_encrypt(&desc, sg_out, sg_in, *dst_len);#
+			. free the block ciphers at the end
+				crypto_free_blkcipher(tfm);
+	
+	j. Decryption:	
+		Encrypted data would be read from the input file and check for the filesize. In case of file size is 0, a zero sized file would
+		be created as output.
+		If the file size is greater than 0, then check for the 128bits key and compare with the newly generated double hashed value, if it
+		does not match, return the appropriate error message to the user and terminate the process.
+		In case of file ley match, read the encrypted data in the chunk of PAGE_SIZE(4KB) and send it for decryption.
+			doDecryption(k_arg->keybuf, AES_BLOCK_SIZE, bufTemp, &bytesRead, buf, PAGE_SIZE);
+		In case of last data chunk with size less than PAGE_SIZE, send it for decryption and write the returned decrypted value.
+			doDecryption(k_arg->keybuf, AES_BLOCK_SIZE, bufTemp, &bytesRead, buf, bytesRead);
+		As i am using CTR mode, it will automatically deals with required padding.
+		
+		static int doDecryption(const void *key, int key_len, void *dst, size_t *dst_len, const void *src, size_t src_len)
+		Code has been refernced from ####http://lxr.free-electrons.com/source/net/ceph/crypto.c####
+	        #ceph_aes_decrypt function which eventually call crypto_blkcipher_decrypt# api
+			
+			Function has been refernced from http://lxr.free-electrons.com/source/include/linux/crypto.h#L1386
+			crypto_blkcipher_decrypt(&desc, sg_out, sg_in, *dst_len);
+			
+	k. 	As i am doing all the write operation to the tmp file to avoid partial read/write disaster and also preserve the the past output
+		file in case it is already present. In case of successful encryption/decryption, tmp file will be renamed to the output file
+		and tmp file will be deleted to protect memory leak.
+			vfs_rename(tmpInode, tmpDentry, fileOut->f_path.dentry->d_parent->d_inode,fileOut->f_path.dentry, NULL, 0);
+			
+			tmpDentry = filpw->f_path.dentry;
+            tmpInode = tmpDentry->d_parent->d_inode;
+
+            // delete/unlink the temp output file
+            if (tmpDentry != NULL && tmpInode != NULL)
+                vfs_unlink(tmpInode, tmpDentry, NULL);
+				
+	l.  At the end of the process, all opned files would be closed appropriately and allocated buffers will be freed.
+		
+		filp_close(filpw, NULL);
+        filp_close(filpr, NULL);
+        filp_close(fileOut, NULL);
+		
+				k_arg_md5_hash:
+					kfree(md5_hash);
+				k_arg_desc:    
+					kfree(desc);
+				buf_fail:
+					kfree(buf); 
+					kfree(bufTemp);
+				k_arg_fail:
+					kfree(k_arg);
+				error_happened:
+					return ret;
+	
+	
+	I would like to summarize with all the key test cases which is already tested and verified as part of this project.
+	
+	*************************************************************************************************************************
+	a.  	Error: if password is not specified, or its length is less than 6 characters					*																					*
+	b. 	Error: if encryption/decryption is not specified, or both specified						*																					*			
+	c. 	Error: if input/output files are not given									*																					*
+	d. 	Error: User struct pointer is null, or kernel does not have access to it(EACCES)				*																					*
+	e. 	Error: kernel does not have access to input/output files or keybuffer with size keylength(EACCES)		*			
+	f. 	Error: Input and outpit file name length is greater than 254 characters(ENAMETOOLONG)				*				
+	g.	Error: while copying data from kernel to user space(ENOMEM: Insufficient menory, EFAULT: copying error)		*
+	h. 	Error: Input file does not exist										*																					*
+	i.	Error: User does not have access to read access to the input file						*																					*	
+	j.	Error: Input file is not a regular file, like a directory(incl root directory /)				*																					*
+	k.	Error: Output file does not have write access for particular user						*																					*					
+	l.	Error: Output file is not a regular file, like a directory(incl root directory /)				*																					*
+	m.	Error: Input and output file are same, different symlinks pointing to the same file, same hardlinks		*					
+	n.	Error: Different key used for decryption as compared to encryption.						*																					*						*************************************************************************************************************************																																		
+	
+	Design Behavior:
+	a. Input file with 0 size will be processed and will generate 0 size output file for both encryption and decryption.
+	   So no secret key validation will be performed for 0 size file in the process of encryption/decryption.
+	
+#############################################################################################################################################
+
+
